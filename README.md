@@ -1,5 +1,21 @@
 # Systembolaget MCP Server
 
+> **This fork** ([jprintz/systembolaget-mcp](https://github.com/jprintz/systembolaget-mcp))
+> keeps the server working against the current systembolaget.se and API, which
+> changed after upstream's last update (API key location, search parameters,
+> product endpoint). It also shows Systembolaget's taste clocks (1-12) and
+> tasting notes, serves Streamable HTTP for remote use, and publishes a container
+> image:
+>
+> ```bash
+> docker run -p 8000:8000 ghcr.io/jprintz/systembolaget-mcp:0.2.0   # http://localhost:8000/mcp
+> systembolaget-mcp --transport streamable-http --host 0.0.0.0 --port 8000
+> ```
+>
+> The API is unofficial: it uses the public key the website itself sends to
+> browsers. A daily CI run against the live API (`pytest -m live`) flags when
+> Systembolaget changes something.
+
 A Model Context Protocol (MCP) server for interacting with Systembolaget's APIs. This server provides tools for searching products, retrieving product details, finding stores, and getting store information.
 
 ## Features
