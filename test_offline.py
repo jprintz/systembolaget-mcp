@@ -117,6 +117,9 @@ async def test_tools_are_registered_read_only() -> None:
         "systembolaget_search_products",
         "systembolaget_get_product",
         "systembolaget_search_stores",
+        "systembolaget_get_store",
+        "systembolaget_check_stock",
+        "systembolaget_upcoming_launches",
     }
     for tool in tools.values():
         annotations = tool.annotations
@@ -126,3 +129,139 @@ async def test_tools_are_registered_read_only() -> None:
         assert annotations.destructive_hint is False
         assert annotations.idempotent_hint is True
         assert annotations.open_world_hint is True
+
+
+# --- new filters, stores, stock and launches -------------------------------------------
+
+
+def test_new_search_filters_and_sorting() -> None:
+    params = sb.SearchProductsInput(
+        category="Vin",
+        subcategory="Rött vin",
+        food_pairing=["Lamm", "Nöt"],
+        grape="Nebbiolo",
+        labels=["organic", "vegan", "natural_wine"],
+        vintage=2020,
+        assortment="Fast sortiment",
+        new_arrivals="last_month",
+        max_sugar_g_per_l=3.5,
+        packaging="Glasflaska",
+        sort_by="price",
+        sort_direction="desc",
+        limit=10,
+    )
+    qp = sb.build_search_params(params)
+    assert qp["categoryLevel2"] == "Rött vin"
+    assert qp["tasteSymbols"] == ["Lamm", "Nöt"]
+    assert qp["grapes"] == "Nebbiolo"
+    assert qp["label"] == ["Ekologiskt"]
+    assert qp["otherSelections"] == ["Vegansk", "Naturvin"]
+    assert qp["vintage"] == 2020
+    assert qp["assortmentText"] == "Fast sortiment"
+    assert qp["newArrivalType"] == "Nytt senaste månaden"
+    assert qp["sugarContent.max"] == 4
+    assert qp["packagingLevel1"] == "Glasflaska"
+    assert (qp["sortBy"], qp["sortDirection"]) == ("Price", "Descending")
+
+
+STORE = {
+    "siteId": "0104",
+    "alias": None,
+    "address": "Nybrogatan 47",
+    "postalCode": "114 39",
+    "city": "STOCKHOLM",
+    "phone": "08-662 50 16",
+    "isActive": True,
+    "isTastingStore": False,
+    "position": {"latitude": 59.3371, "longitude": 18.0790},
+    "openingHours": [
+        {"date": "2026-10-08T00:00:00", "openFrom": "10:00:00", "openTo": "19:00:00", "reason": None},
+        {"date": "2026-10-09T00:00:00", "openFrom": "10:00:00", "openTo": "19:00:00", "reason": None},
+        {"date": "2026-10-10T00:00:00", "openFrom": "10:00:00", "openTo": "15:00:00", "reason": None},
+        {"date": "2026-10-11T00:00:00", "openFrom": "00:00:00", "openTo": "00:00:00", "reason": "-"},
+        {"date": "2026-10-12T00:00:00", "openFrom": "00:00:00", "openTo": "00:00:00", "reason": "Helgdag"},
+    ],
+}
+
+
+def at(stamp: str) -> "sb.datetime":
+    return sb.datetime.fromisoformat(stamp).replace(tzinfo=sb.STOCKHOLM)
+
+
+def test_open_now() -> None:
+    assert sb.open_now(STORE, at("2026-10-08T12:00")) == "Open now (closes 19:00)"
+    assert sb.open_now(STORE, at("2026-10-08T08:30")) == "Closed now (opens today 10:00)"
+    assert sb.open_now(STORE, at("2026-10-10T16:00")) == "Closed now"  # no later opening listed
+    assert sb.open_now(STORE, at("2026-10-09T19:30")) == "Closed now (opens Sat 10:00)"
+
+
+def test_opening_hours_show_closed_days_and_reasons() -> None:
+    hours = sb.format_opening_hours(STORE)
+    assert "- Thu 2026-10-08: 10:00-19:00" in hours
+    assert "- Sun 2026-10-11: closed\n" in hours
+    assert "- Mon 2026-10-12: closed (Helgdag)" in hours
+
+
+def test_normalize_store_id() -> None:
+    assert sb.normalize_store_id("104") == "0104"
+    assert sb.normalize_store_id(" 0104 ") == "0104"
+
+
+@pytest.fixture
+def routed(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Answer API calls by URL suffix; record the URLs requested."""
+    routes: dict[str, Any] = {}
+    seen: list[str] = []
+
+    async def fake_key() -> str:
+        return "test-key"
+
+    async def fake_request(url: str, params: Any = None, headers: Any = None) -> Any:
+        seen.append(url)
+        for suffix, response in routes.items():
+            if url.endswith(suffix):
+                return response
+        raise AssertionError(f"unexpected request {url}")
+
+    monkeypatch.setattr(sb, "extract_api_key", fake_key)
+    monkeypatch.setattr(sb, "make_api_request", fake_request)
+    monkeypatch.setattr(sb, "_stores_cache", None)
+    return {"routes": routes, "seen": seen}
+
+
+async def test_check_stock_nearest_stores(routed: dict[str, Any]) -> None:
+    far = {**STORE, "siteId": "1411", "address": "Linnégatan 28 B", "city": "GÖTEBORG",
+           "position": {"latitude": 57.69, "longitude": 11.95}}
+    routed["routes"].update({
+        "/product/productNumber/141212": {"productId": "507949", "productNameBold": "Norrlands Guld",
+                                          "productNameThin": "Export"},
+        "/site/stores": [STORE, far],
+        "/stockbalance/store/0104/507949": {"stock": 409, "shelf": "27-10-01", "isInStoreAssortment": True},
+    })
+    result = await sb.check_stock(
+        sb.CheckStockInput(product_number="141212", latitude=59.34, longitude=18.07, max_stores=1)
+    )
+    # Stock is looked up by productId, at the nearest store only.
+    assert routed["seen"][-1].endswith("/stockbalance/store/0104/507949")
+    assert "Norrlands Guld - Export" in result
+    assert "**409 in stock**, shelf 27-10-01" in result
+    assert "Göteborg" not in result and "GÖTEBORG" not in result
+
+
+async def test_check_stock_needs_a_place() -> None:
+    result = await sb.check_stock(sb.CheckStockInput(product_number="141212"))
+    assert result.startswith("Error:")
+
+
+async def test_upcoming_launch_calendar(routed: dict[str, Any]) -> None:
+    routed["routes"]["/productsearch/search"] = {
+        "products": [],
+        "metadata": {"docCount": 0},
+        "filters": [{"name": "UpcomingLaunches", "searchModifiers": [
+            {"value": "Lansering 2026-10-09", "count": 60},
+            {"value": "Lansering 2026-10-15", "count": 25},
+        ]}],
+    }
+    result = await sb.upcoming_launches(sb.UpcomingLaunchesInput())
+    assert "- Fri 2026-10-09: 60 products" in result
+    assert "- Thu 2026-10-15: 25 products" in result

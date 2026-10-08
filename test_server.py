@@ -189,3 +189,37 @@ if __name__ == "__main__":
     import sys
 
     pytest.main([__file__, "-v"] + sys.argv[1:])
+
+
+class TestNewTools:
+    """Live checks for the tools added in this fork."""
+
+    async def test_get_store_opening_hours(self):
+        from systembolaget_mcp import GetStoreInput, get_store
+
+        result = await get_store(GetStoreInput(store_id="0104"))
+        assert "Nybrogatan" in result
+        assert "Opening hours" in result
+
+    async def test_check_stock_in_stockholm(self):
+        from systembolaget_mcp import CheckStockInput, check_stock
+
+        # Norrlands Guld Export: in the fixed assortment of virtually every store.
+        result = await check_stock(
+            CheckStockInput(product_number="141212", latitude=59.3326, longitude=18.0649, max_stores=3)
+        )
+        assert "in stock" in result
+        assert not result.startswith("Error")
+
+    async def test_upcoming_launches_calendar(self):
+        from systembolaget_mcp import UpcomingLaunchesInput, upcoming_launches
+
+        result = await upcoming_launches(UpcomingLaunchesInput())
+        assert "Upcoming launches" in result or "No upcoming launches" in result
+
+    async def test_search_with_new_filters(self):
+        params = SearchProductsInput(
+            category="Vin", food_pairing=["Lamm"], labels=["organic"], sort_by="price", limit=3
+        )
+        result = await search_products(params)
+        assert "Product Search Results" in result

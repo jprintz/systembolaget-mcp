@@ -3,12 +3,20 @@
 > **This fork** ([jprintz/systembolaget-mcp](https://github.com/jprintz/systembolaget-mcp))
 > keeps the server working against the current systembolaget.se and API, which
 > changed after upstream's last update (API key location, search parameters,
-> product endpoint). It also shows Systembolaget's taste clocks (1-12) and
-> tasting notes, serves Streamable HTTP for remote use, and publishes a container
-> image:
+> product endpoint), and is ported to the MCP Python SDK 2.x. It adds:
+>
+> - taste clocks (1-12) and tasting notes on every product;
+> - search filters for food pairing, grape, organic/vegan/natural wine, vintage,
+>   sub-category, assortment (incl. web releases), new arrivals, sugar, packaging,
+>   and sorting by price, name or launch date;
+> - `systembolaget_get_store`: address, phone, open-now and opening hours;
+> - `systembolaget_check_stock`: stock and shelf in one store or the nearest ones;
+> - `systembolaget_upcoming_launches`: the release calendar and what launches when;
+> - full tool annotations (all tools are read-only);
+> - Streamable HTTP for remote use, and a container image:
 >
 > ```bash
-> docker run -p 8000:8000 ghcr.io/jprintz/systembolaget-mcp:0.3.0   # http://localhost:8000/mcp
+> docker run -p 8000:8000 ghcr.io/jprintz/systembolaget-mcp:0.4.0   # http://localhost:8000/mcp
 > systembolaget-mcp --transport streamable-http --host 0.0.0.0 --port 8000
 > ```
 >

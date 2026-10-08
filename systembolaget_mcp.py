@@ -4,11 +4,15 @@ A Model Context Protocol server for interacting with Systembolaget's APIs.
 Provides tools for searching products, stores, and retrieving detailed information.
 """
 
+import asyncio
 import json
 import logging
 import math
 import os
 import re
+import time
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from functools import wraps
 from typing import Optional, Literal, Callable, Any
 import httpx
@@ -375,6 +379,42 @@ def truncate_response(content: str, limit: int = CHARACTER_LIMIT) -> str:
 # Input Models
 
 
+# Values Systembolaget's search API accepts (from its filter facets).
+FOOD_PAIRINGS = [
+    "Aperitif", "Asiatiskt", "Avec/digestif", "Buffémat", "Dessert", "Drinkingrediens",
+    "Fisk", "Fläsk", "Fågel", "Grillat", "Grönsaker", "Hamburgare", "Kryddstarkt", "Lamm",
+    "Nöt", "Ost", "Pasta", "Pizza", "Skaldjur", "Snacks", "Sällskapsdryck", "Vilt",
+]
+ASSORTMENTS = [
+    "Fast sortiment", "Tillfälligt sortiment", "Lokalt & Småskaligt", "Säsong",
+    "Webblanseringar", "Ordervaror", "Presentsortiment",
+]
+PACKAGINGS = [
+    "Glasflaska", "Lättare glasflaska", "Burk", "Multipack", "Box", "PET-flaska",
+    "Pappförpackning", "Fat", "Returglas", "Påse",
+]
+LabelName = Literal[
+    "organic", "vegan", "natural_wine", "gluten_free", "kosher", "fairtrade", "fair_for_life"
+]
+# label -> (API parameter, value)
+LABEL_FILTERS: dict[str, tuple[str, str]] = {
+    "organic": ("label", "Ekologiskt"),
+    "vegan": ("otherSelections", "Vegansk"),
+    "natural_wine": ("otherSelections", "Naturvin"),
+    "gluten_free": ("otherSelections", "Glutenfri"),
+    "kosher": ("otherSelections", "Koscher"),
+    "fairtrade": ("ethicalLabel", "Fairtrade"),
+    "fair_for_life": ("ethicalLabel", "Fair for Life"),
+}
+NEW_ARRIVALS = {
+    "today": "Nytt idag",
+    "last_week": "Nytt senaste veckan",
+    "last_month": "Nytt senaste månaden",
+    "last_3_months": "Nytt senaste 3 månader",
+}
+SORT_FIELDS = {"price": "Price", "name": "Name", "launch_date": "ProductLaunchDate"}
+
+
 class SearchProductsInput(BaseModel):
     """Input model for searching products."""
 
@@ -393,6 +433,45 @@ class SearchProductsInput(BaseModel):
         None, ge=0, le=100, description="Maximum alcohol percentage (0-100)"
     )
     country: Optional[str] = Field(None, description="Filter by country of origin")
+    subcategory: Optional[str] = Field(
+        None,
+        description=(
+            "Sub-category in Swedish, e.g. 'Rött vin', 'Vitt vin', 'Rosévin', "
+            "'Mousserande vin', 'Ljus lager', 'Ale', 'Whisky', 'Gin'"
+        ),
+    )
+    food_pairing: Optional[list[str]] = Field(
+        None,
+        description=(
+            "Food the drink suits (matches any): " + ", ".join(FOOD_PAIRINGS)
+        ),
+    )
+    grape: Optional[str] = Field(None, description="Grape variety, e.g. 'Chardonnay', 'Nebbiolo'")
+    labels: Optional[list[LabelName]] = Field(
+        None,
+        description=(
+            "Product labels. Different kinds combine with AND (organic + vegan); vegan, "
+            "natural_wine, gluten_free and kosher are one Systembolaget filter, so several "
+            "of those match any of them."
+        ),
+    )
+    vintage: Optional[int] = Field(None, ge=1900, le=2100, description="Vintage (year)")
+    assortment: Optional[str] = Field(
+        None, description="Assortment, one of: " + ", ".join(ASSORTMENTS)
+    )
+    new_arrivals: Optional[Literal["today", "last_week", "last_month", "last_3_months"]] = Field(
+        None, description="Only products that arrived in the assortment recently"
+    )
+    max_sugar_g_per_l: Optional[float] = Field(
+        None, ge=0, description="Maximum sugar content in grams per litre (dry wine: about 4)"
+    )
+    packaging: Optional[str] = Field(
+        None, description="Packaging, one of: " + ", ".join(PACKAGINGS)
+    )
+    sort_by: Optional[Literal["price", "name", "launch_date"]] = Field(
+        None, description="Sort order (default: relevance)"
+    )
+    sort_direction: Literal["asc", "desc"] = Field("asc", description="Sort direction")
     limit: int = Field(
         DEFAULT_PAGE_SIZE,
         ge=1,
@@ -504,9 +583,10 @@ def handle_tool_errors(func: Callable[..., Any]) -> Callable[..., Any]:
 async def search_products(params: SearchProductsInput) -> str:
     """Search for products in Systembolaget's catalog.
 
-    This tool searches Systembolaget's product database with various filters like
-    category, price range, alcohol content, and country of origin. Returns detailed
-    product information including prices, volumes, and taste profiles.
+    Filters: text, category and sub-category, price, alcohol, country, food pairing,
+    grape, labels (organic, vegan, natural wine, ...), vintage, assortment (incl.
+    web releases), new arrivals, maximum sugar and packaging. Sort by price, name or
+    launch date. Results include price, taste clocks and tasting notes.
 
     Args:
         params: Search parameters including query, filters, and pagination options
@@ -519,7 +599,15 @@ async def search_products(params: SearchProductsInput) -> str:
     # Get API key (automatically extracted from website)
     api_key = await extract_api_key()
 
-    # Build query parameters
+    query_params = build_search_params(params)
+    headers = {"Ocp-Apim-Subscription-Key": api_key, "Origin": "https://www.systembolaget.se"}
+    url = f"{SYSTEMBOLAGET_API_BASE}/productsearch/search"
+    data = await make_api_request(url, params=query_params, headers=headers)
+    return format_search_results(data, params.limit, params.offset, params.format)
+
+
+def build_search_params(params: SearchProductsInput) -> dict[str, Any]:
+    """Translate tool input into productsearch query parameters."""
     query_params: dict[str, Any] = {}
 
     if params.query:
@@ -537,32 +625,52 @@ async def search_products(params: SearchProductsInput) -> str:
     if params.country:
         query_params["country"] = params.country
 
+    if params.subcategory:
+        query_params["categoryLevel2"] = params.subcategory
+    if params.food_pairing:
+        query_params["tasteSymbols"] = list(params.food_pairing)
+    if params.grape:
+        query_params["grapes"] = params.grape
+    for label in params.labels or []:
+        key, value = LABEL_FILTERS[label]
+        query_params.setdefault(key, []).append(value)
+    if params.vintage is not None:
+        query_params["vintage"] = params.vintage
+    if params.assortment:
+        query_params["assortmentText"] = params.assortment
+    if params.new_arrivals:
+        query_params["newArrivalType"] = NEW_ARRIVALS[params.new_arrivals]
+    if params.max_sugar_g_per_l is not None:
+        query_params["sugarContent.max"] = math.ceil(params.max_sugar_g_per_l)
+    if params.packaging:
+        query_params["packagingLevel1"] = params.packaging
+    if params.sort_by:
+        query_params["sortBy"] = SORT_FIELDS[params.sort_by]
+        query_params["sortDirection"] = "Descending" if params.sort_direction == "desc" else "Ascending"
+
     # Note: API uses page-based pagination. We convert offset to page number.
     # For best results, use offset values that are multiples of limit.
-    page = params.offset // params.limit + 1
-    query_params["page"] = page
+    query_params["page"] = params.offset // params.limit + 1
     query_params["size"] = params.limit
+    return query_params
 
-    # Make API request
-    headers = {"Ocp-Apim-Subscription-Key": api_key, "Origin": "https://www.systembolaget.se"}
 
-    url = f"{SYSTEMBOLAGET_API_BASE}/productsearch/search"
-    data = await make_api_request(url, params=query_params, headers=headers)
-
+def format_search_results(data: dict[str, Any], limit: int, offset: int, fmt: str) -> str:
+    """Render a productsearch response as markdown or JSON."""
     products = data.get("products", [])
     total_count = data.get("metadata", {}).get("docCount", len(products))
 
     logger.info(f"Found {total_count} products, returning {len(products)}")
 
-    if params.format == "json":
+    if fmt == "json":
         result = {
             "products": products,
             "pagination": {
-                "limit": params.limit,
-                "offset": params.offset,
+                "limit": limit,
+                "offset": offset,
                 "total_count": total_count,
                 "returned_count": len(products),
-                "has_more": params.offset + len(products) < total_count,
+                "has_more": offset + len(products) < total_count,
             },
         }
         return truncate_response(json.dumps(result, indent=2, ensure_ascii=False))
@@ -578,8 +686,8 @@ async def search_products(params: SearchProductsInput) -> str:
         result += format_product_markdown(product) + "\n\n"
 
     # Pagination info
-    if params.offset + len(products) < total_count:
-        next_offset = params.offset + params.limit
+    if offset + len(products) < total_count:
+        next_offset = offset + limit
         result += f"\n---\n**More results available.** Use `offset: {next_offset}` to see the next page.\n"
 
     return truncate_response(result)
@@ -722,60 +830,288 @@ async def search_stores(params: SearchStoresInput) -> str:
     return truncate_response(result)
 
 
-# Note: Individual store lookup endpoint not available in current API.
-# The endpoint /site/{store_id} returns 404 errors.
-# Keeping function for potential future use if endpoint becomes available.
-# To enable, uncomment the @mcp.tool decorator below.
-#
-# @mcp.tool(
-#     name="systembolaget_get_store",
-#     annotations=read_only_tool("Get Systembolaget store details"),
-# )
+STOCKHOLM = ZoneInfo("Europe/Stockholm")
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+STORES_CACHE_DURATION = 3600
+_stores_cache: tuple[float, list[dict[str, Any]]] | None = None
+
+
+def api_headers(api_key: str) -> dict[str, str]:
+    return {"Ocp-Apim-Subscription-Key": api_key, "Origin": "https://www.systembolaget.se"}
+
+
+def normalize_store_id(store_id: str) -> str:
+    """Store IDs are four digits ("0104"); accept "104" too."""
+    store_id = store_id.strip()
+    return store_id.zfill(4) if store_id.isdigit() else store_id
+
+
+async def fetch_all_stores(api_key: str) -> list[dict[str, Any]]:
+    """All stores with address, position and opening hours (cached for an hour)."""
+    global _stores_cache
+    if _stores_cache and time.time() - _stores_cache[0] < STORES_CACHE_DURATION:
+        return _stores_cache[1]
+    stores = await make_api_request(f"{SYSTEMBOLAGET_API_BASE}/site/stores", headers=api_headers(api_key))
+    stores = [s for s in stores if s.get("isActive", True)]
+    _stores_cache = (time.time(), stores)
+    return stores
+
+
+def store_name(store: dict[str, Any]) -> str:
+    return store.get("alias") or store.get("displayName") or store.get("address") or store.get("siteId", "?")
+
+
+def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance (haversine)."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 6371.0 * 2 * math.asin(math.sqrt(a))
+
+
+def opening_day(entry: dict[str, Any]) -> tuple[date, str | None, str | None]:
+    """(date, opens, closes) for one openingHours entry; opens is None when closed."""
+    day = datetime.fromisoformat(entry["date"]).date()
+    opens, closes = (entry.get("openFrom") or "")[:5], (entry.get("openTo") or "")[:5]
+    if not opens or opens == closes:  # 00:00-00:00 means closed
+        return day, None, None
+    return day, opens, closes
+
+
+def open_now(store: dict[str, Any], now: datetime | None = None) -> str:
+    """'Open now (closes 19:00)', 'Closed now (opens Mon 10:00)' or ''."""
+    now = now or datetime.now(STOCKHOLM)
+    days = [opening_day(e) for e in store.get("openingHours") or [] if e.get("date")]
+    for day, opens, closes in days:
+        if day == now.date() and opens and opens <= now.strftime("%H:%M") < closes:
+            return f"Open now (closes {closes})"
+    for day, opens, _ in days:
+        starts = datetime.combine(day, datetime.min.time(), STOCKHOLM)
+        if opens and (day > now.date() or (day == now.date() and now.strftime("%H:%M") < opens)):
+            when = "today" if day == now.date() else WEEKDAYS[starts.weekday()]
+            return f"Closed now (opens {when} {opens})"
+    return "Closed now" if days else ""
+
+
+def format_opening_hours(store: dict[str, Any], days: int = 7) -> str:
+    md = ""
+    for entry in (store.get("openingHours") or [])[:days]:
+        if not entry.get("date"):
+            continue
+        day, opens, closes = opening_day(entry)
+        hours = f"{opens}-{closes}" if opens else "closed"
+        reason = entry.get("reason")
+        note = f" ({reason})" if reason and reason != "-" else ""
+        md += f"- {WEEKDAYS[day.weekday()]} {day.isoformat()}: {hours}{note}\n"
+    return md
+
+
+@mcp.tool(
+    name="systembolaget_get_store",
+    annotations=read_only_tool("Get Systembolaget store details"),
+)
 @handle_tool_errors
 async def get_store(params: GetStoreInput) -> str:
-    """Get detailed information about a specific store.
-
-    Retrieves comprehensive details about a store including address, contact
-    information, opening hours, and available services.
-
-    Note: This endpoint is currently not available in the API and will return
-    a 404 error. Use search_stores instead.
-
-    Args:
-        params: Store parameters including store ID and format
-
-    Returns:
-        str: Detailed store information
+    """Get a store's address, phone, whether it is open now, and its opening hours
+    for the coming days (including holiday closures). Find store IDs with
+    systembolaget_search_stores.
     """
-    logger.info(f"Getting store: {params.store_id}")
-
-    # Get API key (automatically extracted from website)
+    store_id = normalize_store_id(params.store_id)
+    logger.info(f"Getting store: {store_id}")
     api_key = await extract_api_key()
-
-    headers = {"Ocp-Apim-Subscription-Key": api_key}
-
-    url = f"{SYSTEMBOLAGET_API_BASE}/site/{params.store_id}"
-    store = await make_api_request(url, headers=headers)
+    store = await make_api_request(f"{SYSTEMBOLAGET_API_BASE}/site/store/{store_id}", headers=api_headers(api_key))
 
     if params.format == "json":
         return truncate_response(json.dumps(store, indent=2, ensure_ascii=False))
 
-    # Markdown format with full details
-    result = format_store_markdown(store)
+    md = f"### {store_name(store)}\n\n- **Store ID:** {store.get('siteId', store_id)}\n"
+    address = " ".join(p for p in (store.get("address"), store.get("postalCode"), store.get("city")) if p)
+    if address:
+        md += f"- **Address:** {address}\n"
+    if store.get("phone"):
+        md += f"- **Phone:** {store['phone']}\n"
+    status = open_now(store)
+    if status:
+        md += f"- **Now:** {status}\n"
+    if store.get("isTastingStore"):
+        md += "- **Tastings:** this store hosts drink tastings (dryckesprovningar)\n"
+    if store.get("informationMessage"):
+        md += f"- **Notice:** {store['informationMessage']}\n"
+    hours = format_opening_hours(store)
+    if hours:
+        md += f"\n**Opening hours:**\n{hours}"
+    return truncate_response(md)
 
-    # Add extended information
-    if "services" in store and store["services"]:
-        result += "\n**Services:**\n"
-        for service in store["services"]:
-            result += f"- {service}\n"
 
-    if "parkingInfo" in store:
-        result += f"\n**Parking:** {store['parkingInfo']}\n"
+class CheckStockInput(BaseModel):
+    """Input model for checking stock."""
 
-    if "publicTransport" in store:
-        result += f"\n**Public Transport:** {store['publicTransport']}\n"
+    model_config = ConfigDict(str_strip_whitespace=True)
 
-    return truncate_response(result)
+    product_number: str = Field(..., description="Product number (artikelnummer), e.g. '141212'")
+    store_id: Optional[str] = Field(None, description="Check one store (from systembolaget_search_stores)")
+    city: Optional[str] = Field(None, description="Check stores in this city, e.g. 'Göteborg'")
+    latitude: Optional[float] = Field(None, ge=-90, le=90, description="Check the stores nearest this point")
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+    max_stores: int = Field(5, ge=1, le=15, description="How many stores to check (nearest first)")
+    format: Literal["markdown", "json"] = Field(
+        "markdown",
+        description="Response format: 'markdown' for human-readable or 'json' for structured data",
+    )
+
+
+@mcp.tool(
+    name="systembolaget_check_stock",
+    annotations=read_only_tool("Check Systembolaget store stock"),
+)
+@handle_tool_errors
+async def check_stock(params: CheckStockInput) -> str:
+    """Check whether a product is in stock in a store, and on which shelf. Give one
+    store_id; or latitude/longitude to check the nearest stores (optionally within a
+    city); or just a city to check up to max_stores of its stores.
+    """
+    if not (params.store_id or params.city or (params.latitude is not None and params.longitude is not None)):
+        return "Error: give a store_id, a city, or latitude and longitude."
+    api_key = await extract_api_key()
+    headers = api_headers(api_key)
+    product = await make_api_request(
+        f"{SYSTEMBOLAGET_API_BASE}/product/productNumber/{params.product_number}", headers=headers
+    )
+    # Stock is keyed by the internal productId, not the product number.
+    product_id = product.get("productId")
+    name = " - ".join(p for p in (product.get("productNameBold"), product.get("productNameThin")) if p)
+
+    candidates: list[tuple[dict[str, Any], float | None]]
+    if params.store_id:
+        store_id = normalize_store_id(params.store_id)
+        known = {s["siteId"]: s for s in await fetch_all_stores(api_key)}
+        candidates = [(known.get(store_id, {"siteId": store_id}), None)]
+    else:
+        stores = await fetch_all_stores(api_key)
+        if params.city:
+            city = params.city.casefold()
+            stores = [s for s in stores if city in (s.get("city") or "").casefold()]
+        if params.latitude is not None and params.longitude is not None:
+            ranked = []
+            for s in stores:
+                pos = s.get("position") or {}
+                if pos.get("latitude") is not None and pos.get("longitude") is not None:
+                    ranked.append((s, distance_km(params.latitude, params.longitude, pos["latitude"], pos["longitude"])))
+            ranked.sort(key=lambda item: item[1])
+            candidates = ranked[: params.max_stores]
+        else:
+            candidates = [(s, None) for s in stores[: params.max_stores]]
+        if not candidates:
+            return f"No stores found{' in ' + params.city if params.city else ''}."
+
+    semaphore = asyncio.Semaphore(5)
+
+    async def stock_at(store: dict[str, Any]) -> dict[str, Any]:
+        async with semaphore:
+            return await make_api_request(
+                f"{SYSTEMBOLAGET_API_BASE}/stockbalance/store/{store['siteId']}/{product_id}", headers=headers
+            )
+
+    balances = await asyncio.gather(*(stock_at(store) for store, _ in candidates))
+    rows = []
+    for (store, km), balance in zip(candidates, balances):
+        rows.append({
+            "store_id": store.get("siteId"),
+            "store": store_name(store),
+            "address": " ".join(p for p in (store.get("address"), store.get("city")) if p),
+            "distance_km": round(km, 1) if km is not None else None,
+            "stock": balance.get("stock", 0),
+            "shelf": balance.get("shelf"),
+            "in_store_assortment": balance.get("isInStoreAssortment", False),
+            "open_now": open_now(store),
+        })
+    rows.sort(key=lambda r: (r["stock"] <= 0, r["distance_km"] if r["distance_km"] is not None else 0))
+
+    if params.format == "json":
+        return json.dumps({"product_number": params.product_number, "product": name, "stores": rows},
+                          indent=2, ensure_ascii=False)
+
+    in_stock = sum(1 for r in rows if r["stock"] > 0)
+    md = f"# Stock: {name} ({params.product_number})\n\nIn stock in {in_stock} of {len(rows)} checked stores.\n\n"
+    for r in rows:
+        where = f" ({r['distance_km']} km)" if r["distance_km"] is not None else ""
+        if r["stock"] > 0:
+            shelf = f", shelf {r['shelf']}" if r["shelf"] else ""
+            status = f"**{r['stock']} in stock**{shelf}"
+        elif r["in_store_assortment"]:
+            status = "out of stock right now"
+        else:
+            status = "not stocked here (can be ordered to the store)"
+        now = f" - {r['open_now']}" if r["open_now"] else ""
+        md += f"- **{r['store']}**, {r['address']}{where} [store {r['store_id']}]: {status}{now}\n"
+    return md
+
+
+class UpcomingLaunchesInput(BaseModel):
+    """Input model for upcoming launches."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    launch_date: Optional[str] = Field(
+        None, description="Show the products launching on this date (YYYY-MM-DD); omit for the calendar"
+    )
+    category: Optional[str] = Field(None, description="Filter by category (e.g., 'Öl', 'Vin', 'Sprit')")
+    limit: int = Field(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE, description="Products to show")
+    offset: int = Field(0, ge=0, description="Number of products to skip for pagination")
+    format: Literal["markdown", "json"] = Field(
+        "markdown",
+        description="Response format: 'markdown' for human-readable or 'json' for structured data",
+    )
+
+    @field_validator("launch_date")
+    @classmethod
+    def validate_launch_date(cls, v):
+        if v is not None:
+            date.fromisoformat(v)
+        return v
+
+
+@mcp.tool(
+    name="systembolaget_upcoming_launches",
+    annotations=read_only_tool("Systembolaget release calendar"),
+)
+@handle_tool_errors
+async def upcoming_launches(params: UpcomingLaunchesInput) -> str:
+    """Systembolaget's release calendar: without launch_date, the upcoming launch dates
+    and how many products launch on each; with launch_date, the products launching
+    that day (with taste clocks and tasting notes).
+    """
+    api_key = await extract_api_key()
+    headers = api_headers(api_key)
+    url = f"{SYSTEMBOLAGET_API_BASE}/productsearch/search"
+    query: dict[str, Any] = {"categoryLevel1": params.category} if params.category else {}
+
+    if params.launch_date:
+        query.update({
+            "upcomingLaunches": f"Lansering {params.launch_date}",
+            "page": params.offset // params.limit + 1,
+            "size": params.limit,
+        })
+        data = await make_api_request(url, params=query, headers=headers)
+        return format_search_results(data, params.limit, params.offset, params.format)
+
+    data = await make_api_request(url, params={**query, "page": 1, "size": 1}, headers=headers)
+    facet = next((f for f in data.get("filters", []) if f.get("name") == "UpcomingLaunches"), None)
+    launches = [
+        {"date": m["value"].removeprefix("Lansering ").strip(), "products": m.get("count", 0)}
+        for m in (facet or {}).get("searchModifiers", [])
+        if m.get("value", "").startswith("Lansering")
+    ]
+    if params.format == "json":
+        return json.dumps({"launches": launches}, indent=2, ensure_ascii=False)
+    if not launches:
+        return "No upcoming launches announced."
+    md = "# Upcoming launches\n\n"
+    for launch in launches:
+        weekday = WEEKDAYS[date.fromisoformat(launch["date"]).weekday()]
+        md += f"- {weekday} {launch['date']}: {launch['products']} products\n"
+    md += "\nUse `launch_date` to list the products of one date.\n"
+    return md
 
 
 def main() -> None:
