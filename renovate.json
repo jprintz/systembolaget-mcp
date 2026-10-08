@@ -2,5 +2,12 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
   "labels": ["dependencies"],
-  "lockFileMaintenance": { "enabled": true }
+  "lockFileMaintenance": { "enabled": true },
+  "packageRules": [
+    {
+      "description": "The server uses the mcp 1.x API (mcp.server.fastmcp); 2.x needs a port to MCPServer first",
+      "matchPackageNames": ["mcp"],
+      "allowedVersions": "<2"
+    }
+  ]
 }
