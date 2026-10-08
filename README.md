@@ -8,7 +8,7 @@
 > image:
 >
 > ```bash
-> docker run -p 8000:8000 ghcr.io/jprintz/systembolaget-mcp:0.2.0   # http://localhost:8000/mcp
+> docker run -p 8000:8000 ghcr.io/jprintz/systembolaget-mcp:0.3.0   # http://localhost:8000/mcp
 > systembolaget-mcp --transport streamable-http --host 0.0.0.0 --port 8000
 > ```
 >

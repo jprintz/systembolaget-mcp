@@ -13,14 +13,38 @@ from functools import wraps
 from typing import Optional, Literal, Callable, Any
 import httpx
 from pydantic import BaseModel, Field, field_validator, ConfigDict
-from mcp.server.fastmcp import FastMCP
+from importlib.metadata import PackageNotFoundError, version as package_version
+from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize FastMCP server
-mcp = FastMCP("systembolaget_mcp")
+try:
+    __version__ = package_version("systembolaget-mcp")
+except PackageNotFoundError:  # running from a source checkout
+    __version__ = "0.0.0"
+
+mcp = MCPServer(
+    "systembolaget_mcp",
+    version=__version__,
+    instructions=(
+        "Search Systembolaget's (the Swedish alcohol retailer's) assortment, get product "
+        "details including taste clocks and tasting notes, and find stores. Product texts "
+        "are in Swedish."
+    ),
+)
+
+def read_only_tool(title: str) -> ToolAnnotations:
+    """Annotations for tools that only read public data from Systembolaget's API."""
+    return ToolAnnotations(
+        title=title,
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=True,
+    )
 
 # Constants
 CHARACTER_LIMIT = 25000
@@ -472,7 +496,10 @@ def handle_tool_errors(func: Callable[..., Any]) -> Callable[..., Any]:
 # MCP Tools
 
 
-@mcp.tool(name="systembolaget_search_products", annotations={"readOnlyHint": True})
+@mcp.tool(
+    name="systembolaget_search_products",
+    annotations=read_only_tool("Search Systembolaget products"),
+)
 @handle_tool_errors
 async def search_products(params: SearchProductsInput) -> str:
     """Search for products in Systembolaget's catalog.
@@ -558,7 +585,10 @@ async def search_products(params: SearchProductsInput) -> str:
     return truncate_response(result)
 
 
-@mcp.tool(name="systembolaget_get_product", annotations={"readOnlyHint": True})
+@mcp.tool(
+    name="systembolaget_get_product",
+    annotations=read_only_tool("Get Systembolaget product details"),
+)
 @handle_tool_errors
 async def get_product(params: GetProductInput) -> str:
     """Get detailed information about a specific product.
@@ -610,7 +640,10 @@ async def get_product(params: GetProductInput) -> str:
     return truncate_response(result)
 
 
-@mcp.tool(name="systembolaget_search_stores", annotations={"readOnlyHint": True})
+@mcp.tool(
+    name="systembolaget_search_stores",
+    annotations=read_only_tool("Search Systembolaget stores"),
+)
 @handle_tool_errors
 async def search_stores(params: SearchStoresInput) -> str:
     """Search for Systembolaget stores.
@@ -696,7 +729,7 @@ async def search_stores(params: SearchStoresInput) -> str:
 #
 # @mcp.tool(
 #     name="systembolaget_get_store",
-#     annotations={"readOnlyHint": True}
+#     annotations=read_only_tool("Get Systembolaget store details"),
 # )
 @handle_tool_errors
 async def get_store(params: GetStoreInput) -> str:
@@ -782,19 +815,12 @@ def main() -> None:
         return
 
     if args.transport == "streamable-http":
-        mcp.settings.host = args.host
-        mcp.settings.port = args.port
-        mcp.settings.stateless_http = True
-        if args.host not in ("127.0.0.1", "localhost", "::1"):
-            # FastMCP enables DNS-rebinding protection for servers created with
-            # the default localhost host. Behind a reverse proxy or tunnel the
-            # Host header is the public name, so turn it off when exposed.
-            from mcp.server.transport_security import TransportSecuritySettings
-
-            mcp.settings.transport_security = TransportSecuritySettings(
-                enable_dns_rebinding_protection=False
-            )
-    mcp.run(args.transport)
+        # DNS-rebinding protection is on automatically when binding to
+        # localhost; bound to 0.0.0.0 behind a tunnel, the Host header is the
+        # public name, so it stays off.
+        mcp.run("streamable-http", host=args.host, port=args.port, stateless_http=True)
+    else:
+        mcp.run("stdio")
 
 
 if __name__ == "__main__":

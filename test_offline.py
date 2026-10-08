@@ -109,3 +109,20 @@ def test_products_without_taste_data_have_no_taste_sections() -> None:
     md = sb.format_product_markdown({"productNameBold": "X", "price": 10, "tasteClocks": []})
     assert "Taste clocks" not in md
     assert "Tasting notes" not in md
+
+
+async def test_tools_are_registered_read_only() -> None:
+    tools = {tool.name: tool for tool in await sb.mcp.list_tools()}
+    assert set(tools) == {
+        "systembolaget_search_products",
+        "systembolaget_get_product",
+        "systembolaget_search_stores",
+    }
+    for tool in tools.values():
+        annotations = tool.annotations
+        assert annotations is not None, tool.name
+        assert annotations.title, tool.name
+        assert annotations.read_only_hint is True
+        assert annotations.destructive_hint is False
+        assert annotations.idempotent_hint is True
+        assert annotations.open_world_hint is True
