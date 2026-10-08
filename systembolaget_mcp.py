@@ -746,8 +746,55 @@ async def get_store(params: GetStoreInput) -> str:
 
 
 def main() -> None:
-    """Main entry point for the MCP server."""
-    mcp.run()
+    """Run the MCP server.
+
+    stdio by default (Claude Desktop and other local clients). As a remote
+    server: --transport streamable-http --host 0.0.0.0 --port 8000, or the
+    same through SYSTEMBOLAGET_MCP_TRANSPORT / _HOST / _PORT. The endpoint is
+    /mcp. --healthcheck exits 0 when the HTTP server accepts connections.
+    """
+    import argparse
+    import socket
+    import sys
+
+    parser = argparse.ArgumentParser(prog="systembolaget-mcp", description=main.__doc__)
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "streamable-http"],
+        default=os.getenv("SYSTEMBOLAGET_MCP_TRANSPORT", "stdio"),
+    )
+    parser.add_argument("--host", default=os.getenv("SYSTEMBOLAGET_MCP_HOST", "127.0.0.1"))
+    parser.add_argument(
+        "--port", type=int, default=int(os.getenv("SYSTEMBOLAGET_MCP_PORT", "8000"))
+    )
+    parser.add_argument(
+        "--healthcheck",
+        action="store_true",
+        help="exit 0 if the HTTP server accepts connections (container health checks)",
+    )
+    args = parser.parse_args()
+
+    if args.healthcheck:
+        try:
+            socket.create_connection(("127.0.0.1", args.port), timeout=2).close()
+        except OSError:
+            sys.exit(1)
+        return
+
+    if args.transport == "streamable-http":
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        mcp.settings.stateless_http = True
+        if args.host not in ("127.0.0.1", "localhost", "::1"):
+            # FastMCP enables DNS-rebinding protection for servers created with
+            # the default localhost host. Behind a reverse proxy or tunnel the
+            # Host header is the public name, so turn it off when exposed.
+            from mcp.server.transport_security import TransportSecuritySettings
+
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=False
+            )
+    mcp.run(args.transport)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,8 @@
 """Test suite for Systembolaget MCP server.
 
 This test suite validates the MCP server tools by calling them directly
-without going through the JSON-RPC protocol.
+without going through the JSON-RPC protocol. These tests call the real
+Systembolaget API: run them with `pytest -m live`.
 """
 
 import pytest
@@ -14,6 +15,8 @@ from systembolaget_mcp import (
     GetProductInput,
     SearchStoresInput,
 )
+
+pytestmark = pytest.mark.live
 
 
 class TestProductSearch:
