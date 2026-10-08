@@ -6,6 +6,7 @@ Provides tools for searching products, stores, and retrieving detailed informati
 
 import json
 import logging
+import math
 import os
 import re
 from functools import wraps
@@ -120,36 +121,26 @@ async def extract_api_key() -> str:
 
     try:
         logger.info("Extracting API key from website")
-        # Get app bundle path
-        bundle_path = await get_app_bundle_path()
+        # The website no longer has a single _app-*.js bundle; the key sits
+        # in one of its Next.js chunks, so scan them all.
+        async with httpx.AsyncClient(timeout=API_TIMEOUT, follow_redirects=True) as client:
+            website = await client.get(SYSTEMBOLAGET_WEBSITE)
+            if website.status_code != 200:
+                raise APIError(f"Failed to fetch Systembolaget website: {website.status_code}")
+            for src in re.findall(r'<script[^>]+src="([^"]+\.js)"', website.text):
+                chunk_url = src if src.startswith("http") else f"{SYSTEMBOLAGET_WEBSITE}{src}"
+                response = await client.get(chunk_url)
+                match = re.search(
+                    r'NEXT_PUBLIC_API_KEY_APIM["\']?\s*[:=]\s*["\']([0-9a-f]{32})["\']', response.text
+                )
+                if match:
+                    api_key = match.group(1)
+                    _cached_api_key = api_key
+                    _api_key_timestamp = time.time()
+                    logger.info("API key extracted and cached successfully")
+                    return api_key
 
-        # Construct full URL
-        if bundle_path.startswith("http"):
-            bundle_url = bundle_path
-        else:
-            bundle_url = f"{SYSTEMBOLAGET_WEBSITE}{bundle_path}"
-
-        # Fetch the app bundle
-        async with httpx.AsyncClient(timeout=API_TIMEOUT) as client:
-            logger.debug(f"Fetching app bundle: {bundle_url}")
-            response = await client.get(bundle_url)
-
-            if response.status_code != 200:
-                raise APIError(f"Failed to fetch app bundle: {response.status_code}")
-
-            # Extract API key using regex
-            # Pattern matches: NEXT_PUBLIC_API_KEY_APIM:"key-value"
-            pattern = r'NEXT_PUBLIC_API_KEY_APIM:"([^"]+)"'
-            match = re.search(pattern, response.text)
-
-            if not match:
-                raise APIError("Could not find API key in app bundle")
-
-            api_key = match.group(1)
-            _cached_api_key = api_key
-            _api_key_timestamp = time.time()
-            logger.info("API key extracted and cached successfully")
-            return api_key
+        raise APIError("Could not find API key on the Systembolaget website")
 
     except httpx.RequestError as e:
         raise APIError(f"Network error extracting API key: {str(e)}")
@@ -216,7 +207,7 @@ def format_product_markdown(product: dict[str, Any]) -> str:
     """
     name = product.get("productNameBold", "Unknown")
     subtitle = product.get("productNameThin", "")
-    price = product.get("price", "N/A")
+    price = product.get("price") or product.get("priceInclVat") or "N/A"
     volume = product.get("volume", "N/A")
     alcohol = product.get("alcoholPercentage", "N/A")
     product_number = product.get("productNumber", "N/A")
@@ -233,21 +224,51 @@ def format_product_markdown(product: dict[str, Any]) -> str:
     md += f"- **Category:** {category}\n"
 
     # Add additional details if available
-    if "country" in product:
+    if product.get("country"):
         md += f"- **Country:** {product['country']}\n"
-    if "assortmentText" in product:
+    if product.get("assortmentText"):
         md += f"- **Assortment:** {product['assortmentText']}\n"
 
-    # Taste profile if available
-    if any(key in product for key in ["tasteClockBitter", "tasteClockSweetness", "tasteClockBody"]):
-        md += "\n**Taste Profile:**\n"
-        if "tasteClockBitter" in product:
-            md += f"- Bitterness: {product['tasteClockBitter']}/12\n"
-        if "tasteClockSweetness" in product:
-            md += f"- Sweetness: {product['tasteClockSweetness']}/12\n"
-        if "tasteClockBody" in product:
-            md += f"- Body: {product['tasteClockBody']}/12\n"
+    md += format_taste_markdown(product)
+    return md
 
+
+# Systembolaget's taste clocks ("smakklockor"), each on a 1-12 scale.
+TASTE_CLOCK_LABELS = {
+    "TasteClockBody": "Body (fyllighet)",
+    "TasteClockSweetness": "Sweetness (sötma)",
+    "TasteClockFruitacid": "Acidity (fruktsyra)",
+    "TasteClockRoughness": "Tannins (strävhet)",
+    "TasteClockBitter": "Bitterness (beska)",
+    "TasteClockSmokiness": "Smokiness (rökighet)",
+    "TasteClockCasque": "Oak (fatkaraktär)",
+}
+
+
+def format_taste_markdown(product: dict[str, Any]) -> str:
+    """Taste clocks and tasting notes, as shown on systembolaget.se."""
+    md = ""
+    # tasteClocks lists exactly the clocks the website shows for this product
+    # (wine: body/tannins/acidity, beer: bitterness/body/sweetness, ...).
+    clocks = [c for c in product.get("tasteClocks") or [] if c.get("value") is not None]
+    if clocks:
+        md += "\n**Taste clocks** (1-12):\n"
+        for clock in clocks:
+            label = TASTE_CLOCK_LABELS.get(clock.get("key"), clock.get("key"))
+            value = int(clock["value"])
+            md += f"- {label}: {value}/12 {'●' * value}{'○' * (12 - value)}\n"
+    if product.get("tasteClockGroup"):
+        md += f"- Style: {product['tasteClockGroup']}\n"
+    notes = [
+        ("Colour (färg)", product.get("color")),
+        ("Aroma (doft)", product.get("aroma")),
+        ("Taste (smak)", product.get("taste")),
+    ]
+    if any(text for _, text in notes):
+        md += "\n**Tasting notes:**\n"
+        for label, text in notes:
+            if text:
+                md += f"- {label}: {text}\n"
     return md
 
 
@@ -475,34 +496,34 @@ async def search_products(params: SearchProductsInput) -> str:
     query_params: dict[str, Any] = {}
 
     if params.query:
-        query_params["searchQuery"] = params.query
+        query_params["textQuery"] = params.query
     if params.category:
-        query_params["category"] = params.category
+        query_params["categoryLevel1"] = params.category
     if params.min_price is not None:
-        query_params["minPrice"] = params.min_price
+        query_params["price.min"] = math.floor(params.min_price)
     if params.max_price is not None:
-        query_params["maxPrice"] = params.max_price
+        query_params["price.max"] = math.ceil(params.max_price)
     if params.min_alcohol is not None:
-        query_params["minAlcohol"] = params.min_alcohol
+        query_params["alcoholPercentage.min"] = params.min_alcohol
     if params.max_alcohol is not None:
-        query_params["maxAlcohol"] = params.max_alcohol
+        query_params["alcoholPercentage.max"] = params.max_alcohol
     if params.country:
         query_params["country"] = params.country
 
     # Note: API uses page-based pagination. We convert offset to page number.
     # For best results, use offset values that are multiples of limit.
-    page = params.offset // params.limit
+    page = params.offset // params.limit + 1
     query_params["page"] = page
-    query_params["pageSize"] = params.limit
+    query_params["size"] = params.limit
 
     # Make API request
-    headers = {"Ocp-Apim-Subscription-Key": api_key}
+    headers = {"Ocp-Apim-Subscription-Key": api_key, "Origin": "https://www.systembolaget.se"}
 
     url = f"{SYSTEMBOLAGET_API_BASE}/productsearch/search"
     data = await make_api_request(url, params=query_params, headers=headers)
 
     products = data.get("products", [])
-    total_count = data.get("metadata", {}).get("totalCount", len(products))
+    total_count = data.get("metadata", {}).get("docCount", len(products))
 
     logger.info(f"Found {total_count} products, returning {len(products)}")
 
@@ -556,9 +577,9 @@ async def get_product(params: GetProductInput) -> str:
     # Get API key (automatically extracted from website)
     api_key = await extract_api_key()
 
-    headers = {"Ocp-Apim-Subscription-Key": api_key}
+    headers = {"Ocp-Apim-Subscription-Key": api_key, "Origin": "https://www.systembolaget.se"}
 
-    url = f"{SYSTEMBOLAGET_API_BASE}/product/{params.product_number}"
+    url = f"{SYSTEMBOLAGET_API_BASE}/product/productNumber/{params.product_number}"
     product = await make_api_request(url, headers=headers)
 
     if params.format == "json":
@@ -568,19 +589,23 @@ async def get_product(params: GetProductInput) -> str:
     result = format_product_markdown(product)
 
     # Add extended information
-    if "description" in product:
+    if product.get("description"):
         result += f"\n**Description:**\n{product['description']}\n"
 
-    if "taste" in product:
-        result += f"\n**Taste:**\n{product['taste']}\n"
-
-    if "usage" in product:
+    if product.get("usage"):
         result += f"\n**Serving Suggestions:**\n{product['usage']}\n"
 
-    if "tasteSymbols" in product and product["tasteSymbols"]:
-        result += "\n**Food Pairings:**\n"
-        for symbol in product["tasteSymbols"]:
-            result += f"- {symbol}\n"
+    pairings = product.get("tasteSymbolsList") or [
+        s for s in (product.get("tasteSymbols") or "").split(";") if s
+    ]
+    if pairings:
+        result += f"\n**Food Pairings:** {', '.join(pairings)}\n"
+
+    for label, key in (("Grapes", "grapes"), ("Vintage", "vintage"), ("Production", "production")):
+        value = product.get(key)
+        if value:
+            value = ", ".join(value) if isinstance(value, list) else value
+            result += f"\n**{label}:** {value}\n"
 
     return truncate_response(result)
 
