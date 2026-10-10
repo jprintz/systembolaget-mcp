@@ -2,7 +2,7 @@
 # uv.lock, so every build of a given commit installs the same versions.
 FROM docker.io/library/python:3.14-slim-trixie
 
-COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.0 /uv /usr/local/bin/uv
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
