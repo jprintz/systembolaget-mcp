@@ -1,6 +1,6 @@
 # Remote MCP server (Streamable HTTP on :8000/mcp). Dependencies come from
 # uv.lock, so every build of a given commit installs the same versions.
-FROM docker.io/library/python:3.14-slim-trixie
+FROM docker.io/library/python:3.15-slim-trixie
 
 COPY --from=ghcr.io/astral-sh/uv:0.12.23 /uv /usr/local/bin/uv
 
