@@ -16,7 +16,7 @@
 > - Streamable HTTP for remote use, and a container image:
 >
 > ```bash
-> docker run -p 8000:8000 ghcr.io/jprintz/systembolaget-mcp:0.4.0   # http://localhost:8000/mcp
+> docker run -p 8000:8000 ghcr.io/jprintz/systembolaget-mcp:0.4.1   # http://localhost:8000/mcp
 > systembolaget-mcp --transport streamable-http --host 0.0.0.0 --port 8000
 > ```
 >
@@ -249,36 +249,36 @@ pytest
 
 **With uv:**
 ```bash
-uv run black systembolaget_mcp.py
+uv run black systembolaget_mcp.py systembolaget_cli.py
 ```
 
 **With pip/venv:**
 ```bash
-black systembolaget_mcp.py
+black systembolaget_mcp.py systembolaget_cli.py
 ```
 
 ### Type Checking
 
 **With uv:**
 ```bash
-uv run mypy systembolaget_mcp.py
+uv run mypy systembolaget_mcp.py systembolaget_cli.py
 ```
 
 **With pip/venv:**
 ```bash
-mypy systembolaget_mcp.py
+mypy systembolaget_mcp.py systembolaget_cli.py
 ```
 
 ### Linting
 
 **With uv:**
 ```bash
-uv run ruff check systembolaget_mcp.py
+uv run ruff check systembolaget_mcp.py systembolaget_cli.py
 ```
 
 **With pip/venv:**
 ```bash
-ruff check systembolaget_mcp.py
+ruff check systembolaget_mcp.py systembolaget_cli.py
 ```
 
 ### Adding Dependencies
