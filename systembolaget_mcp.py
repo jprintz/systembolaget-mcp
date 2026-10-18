@@ -1114,49 +1114,26 @@ async def upcoming_launches(params: UpcomingLaunchesInput) -> str:
     return md
 
 
-def main() -> None:
-    """Run the MCP server.
-
-    stdio by default (Claude Desktop and other local clients). As a remote
-    server: --transport streamable-http --host 0.0.0.0 --port 8000, or the
-    same through SYSTEMBOLAGET_MCP_TRANSPORT / _HOST / _PORT. The endpoint is
-    /mcp. --healthcheck exits 0 when the HTTP server accepts connections.
-    """
-    import argparse
-    import socket
-    import sys
-
-    parser = argparse.ArgumentParser(prog="systembolaget-mcp", description=main.__doc__)
-    parser.add_argument(
-        "--transport",
-        choices=["stdio", "streamable-http"],
-        default=os.getenv("SYSTEMBOLAGET_MCP_TRANSPORT", "stdio"),
-    )
-    parser.add_argument("--host", default=os.getenv("SYSTEMBOLAGET_MCP_HOST", "127.0.0.1"))
-    parser.add_argument(
-        "--port", type=int, default=int(os.getenv("SYSTEMBOLAGET_MCP_PORT", "8000"))
-    )
-    parser.add_argument(
-        "--healthcheck",
-        action="store_true",
-        help="exit 0 if the HTTP server accepts connections (container health checks)",
-    )
-    args = parser.parse_args()
-
-    if args.healthcheck:
-        try:
-            socket.create_connection(("127.0.0.1", args.port), timeout=2).close()
-        except OSError:
-            sys.exit(1)
-        return
-
-    if args.transport == "streamable-http":
+def serve(transport: str, host: str, port: int) -> None:
+    """Run the MCP server on stdio or Streamable HTTP (endpoint /mcp)."""
+    if transport == "streamable-http":
         # DNS-rebinding protection is on automatically when binding to
         # localhost; bound to 0.0.0.0 behind a tunnel, the Host header is the
         # public name, so it stays off.
-        mcp.run("streamable-http", host=args.host, port=args.port, stateless_http=True)
+        mcp.run("streamable-http", host=host, port=port, stateless_http=True)
     else:
         mcp.run("stdio")
+
+
+def main() -> None:
+    """Entry point for `python systembolaget_mcp.py`.
+
+    The installed `systembolaget-mcp` command starts in systembolaget_cli
+    instead, so that --healthcheck never imports this module.
+    """
+    from systembolaget_cli import main as cli_main
+
+    cli_main(serve=serve)
 
 
 if __name__ == "__main__":

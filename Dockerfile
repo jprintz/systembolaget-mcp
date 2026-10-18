@@ -16,7 +16,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     SYSTEMBOLAGET_MCP_PORT=8000
 
 WORKDIR /src
-COPY pyproject.toml uv.lock README.md LICENSE systembolaget_mcp.py ./
+COPY pyproject.toml uv.lock README.md LICENSE systembolaget_mcp.py systembolaget_cli.py ./
 RUN uv sync --frozen --no-dev --no-editable && rm -rf /root/.cache
 
 USER 65532:65532
