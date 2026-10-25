@@ -335,9 +335,9 @@ def format_store_markdown(store: dict[str, Any]) -> str:
     if "openingHours" in store and len(store["openingHours"]) > 0:
         # Find today's hours (usually second entry is today)
         for day_info in store["openingHours"][:3]:  # Check first few days
-            if day_info.get("openFrom") != "00:00:00":
-                open_from = day_info.get("openFrom", "")[:5]  # HH:MM
-                open_to = day_info.get("openTo", "")[:5]
+            open_from = (day_info.get("openFrom") or "")[:5]  # HH:MM
+            open_to = (day_info.get("openTo") or "")[:5]
+            if open_from and open_from != open_to:  # null or 00:00-00:00 means closed
                 md += f"- **Hours:** {open_from} - {open_to}\n"
                 break
 

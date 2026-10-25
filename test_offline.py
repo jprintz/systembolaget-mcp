@@ -202,6 +202,18 @@ def test_opening_hours_show_closed_days_and_reasons() -> None:
     assert "- Mon 2026-10-12: closed (Helgdag)" in hours
 
 
+def test_store_markdown_skips_closed_days_with_null_or_midnight_hours() -> None:
+    """The API reports a closed day as null (formerly 00:00:00) openFrom/openTo."""
+    closed_null = {"date": "2026-10-25T00:00:00", "openFrom": None, "openTo": None, "reason": "-"}
+    closed_midnight = {"date": "2026-10-25T00:00:00", "openFrom": "00:00:00", "openTo": "00:00:00", "reason": "-"}
+    open_day = {"date": "2026-10-26T00:00:00", "openFrom": "10:00:00", "openTo": "19:00:00", "reason": None}
+    for closed in (closed_null, closed_midnight):
+        store = {**STORE, "openingHours": [closed, open_day]}
+        assert "- **Hours:** 10:00 - 19:00" in sb.format_store_markdown(store)
+    only_closed = {**STORE, "openingHours": [closed_null]}
+    assert "Hours" not in sb.format_store_markdown(only_closed)
+
+
 def test_normalize_store_id() -> None:
     assert sb.normalize_store_id("104") == "0104"
     assert sb.normalize_store_id(" 0104 ") == "0104"
